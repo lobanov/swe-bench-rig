@@ -1,0 +1,8 @@
+[project]
+name = "swebench-local-rig"
+version = "0.1.0"
+description = "Rig for verifying a local OpenAI-compatible LLM on SWE-bench Verified using mini-swe-agent and the ghcr.io/epoch-research Docker registry"
+requires-python = ">=3.11"
+
+[tool.uv]
+package = false

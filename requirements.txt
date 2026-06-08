@@ -1,0 +1,8 @@
+mini-swe-agent @ git+https://github.com/SWE-agent/mini-swe-agent.git
+swebench @ git+https://github.com/SWE-bench/SWE-bench.git
+datasets>=2.20
+litellm>=1.55
+openai>=1.50
+python-dotenv
+rich
+typer

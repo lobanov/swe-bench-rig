@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+.env
+.env.last_resolved
+
+runs/
+
+*.traj.json
+*.log
+.DS_Store
+
+vendor/
