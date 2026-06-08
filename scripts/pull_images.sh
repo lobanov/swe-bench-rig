@@ -19,6 +19,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source .venv/bin/activate
+export PYTHONPATH="$(pwd)/config${PYTHONPATH:+:$PYTHONPATH}"
+export MSWEA_SILENT_STARTUP=1
 # Source .env but do NOT overwrite variables already in the environment
 # (so that cmdline `SWEBENCH_SEED=2 ./run.sh` wins over .env's default).
 if [[ -z "${SWEBENCH_SEED:-}" || -z "${LLM_BASE_URL:-}" ]]; then

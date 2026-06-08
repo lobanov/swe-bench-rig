@@ -6,6 +6,11 @@ the public epoch-research registry instead of trying to build locally.
 """
 import os
 
+# Honor MSWEA_SILENT_STARTUP before importing minisweagent so the startup
+# banner does not contaminate scripts that capture stdout (e.g. the
+# sampled_ids.txt file in pull_images.sh).
+os.environ.setdefault("MSWEA_SILENT_STARTUP", "1")
+
 if os.environ.get("MSWEA_IMAGE_REGISTRY"):
     try:
         from minisweagent.run.benchmarks import swebench as _m

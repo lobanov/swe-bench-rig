@@ -8,7 +8,7 @@ on the
 [SWE-bench Verified](https://huggingface.co/datasets/princeton-nlp/SWE-bench_Verified)
 benchmark, against the optimized Docker images from
 [epoch.ai/latest/swebench-docker](https://epoch.ai/latest/swebench-docker)
-(`ghcr.io/epoch-research/sweb-bench.eval.x86_64.<id>:latest`).
+(`ghcr.io/epoch-research/swe-bench.eval.x86_64.<id>:latest`).
 
 The rig is a thin wrapper that defers to the upstream `mini-extra swebench`
 CLI for inference and `swebench.harness.run_evaluation` for grading. No
@@ -24,17 +24,23 @@ See `PLAN.md` for the design and rationale.
 ├── .env.example                         # all knobs, with sane defaults
 ├── config/
 │   ├── mini-swe-agent.local.yaml        # mini-swe-agent config wired to local LLM
-│   └── litellm-registry.json            # cost-tracking stub for the local model
+│   ├── litellm-registry.json            # cost-tracking stub for the local model
+│   └── sitecustomize.py                 # auto-loaded image-resolver monkey-patch
 ├── scripts/
 │   ├── setup.sh                         # create venv, install both repos
 │   ├── check_server.py                  # probe LLM, auto-resolve LLM_MODEL
+│   ├── sample_instances.py              # reproducible random sampling of N instances
 │   ├── pull_images.sh                   # pull & retag ghcr.io/epoch-research images
-│   ├── _mswea_image_patch.py            # 6-line monkey-patch loaded via PYTHONSTARTUP
-│   ├── run_inference.sh                 # run mini-swe-agent batch
+│   ├── run_inference.sh                 # run mini-swe-agent batch on the sample
 │   ├── run_evaluation.sh                # run SWE-bench harness local grading
-│   └── report.py                        # summarise the eval JSON outputs
+│   └── report.py                        # summarise results with Wilson 95% CI
 ├── vendor/swebench/                     # swebench editable install (one-time clone)
 ├── runs/                                # all run artifacts (gitignored)
+│   └── <run_id>/
+│       ├── sampled_ids.txt              # the exact instances picked by the seed
+│       ├── inference/                   # mini-swe-agent preds.json + trajectories
+│       ├── evaluation/                  # swebench harness logs + report
+│       └── report.txt                   # human-readable summary with CI
 └── run.sh                               # end-to-end entry point
 ```
 
@@ -56,12 +62,13 @@ $EDITOR .env                 # adjust LLM_BASE_URL, LLM_API_KEY, etc. if needed
 ./run.sh
 ```
 
-The default scope is a 5-instance smoke test (`SWEBENCH_SLICE=0:5`).
-Bump to a real eval with (note: keep `SWEBENCH_WORKERS=1` — the local LLM
-server is single-threaded, parallel requests just queue):
+The default scope is a 5-instance smoke test sampled from the 500
+SWE-bench Verified instances with seed=1 (`SWEBENCH_N=5 SWEBENCH_SEED=1`).
+Bump to a real eval with (note: keep `SWEBENCH_WORKERS=1` — the local
+LLM server is single-threaded, parallel requests just queue):
 
 ```bash
-SWEBENCH_SLICE=0:100 SWEBENCH_RUN_ID=full-100-$(date +%s) ./run.sh
+SWEBENCH_N=100 SWEBENCH_SEED=1 SWEBENCH_RUN_ID=full-100-$(date +%s) ./run.sh
 ```
 
 ## What `./run.sh` does
@@ -69,27 +76,32 @@ SWEBENCH_SLICE=0:100 SWEBENCH_RUN_ID=full-100-$(date +%s) ./run.sh
 1. **probe LLM** — `scripts/check_server.py` calls `GET {LLM_BASE_URL}/models`
    and auto-resolves `LLM_MODEL=openai/<first-id>`. The result is written
    to `.env.last_resolved` and exported to subsequent steps.
-2. **pull + retag images** — `scripts/pull_images.sh` resolves the
-   instance IDs for the chosen slice, then for each one runs
-   `docker pull ghcr.io/epoch-research/sweb-bench.eval.x86_64.<id>:latest`
-   and `docker tag … sweb.eval.x86_64.<id_with_1776>:latest` so the
-   SWE-bench harness can find them locally with `--namespace none`.
-3. **inference** — `scripts/run_inference.sh` calls
-   `mini-extra swebench` with the upstream config + our local override
-   (`config/mini-swe-agent.local.yaml`) and a 6-line `PYTHONSTARTUP`
-   monkey-patch that redirects docker pulls to the ghcr.io images.
+2. **sample instances** — `scripts/sample_instances.py` uses
+   `random.Random(seed).sample(range(500), N)` to pick N reproducible
+   instance IDs from the SWE-bench Verified test split. The list is
+   written to `runs/<run_id>/sampled_ids.txt`.
+3. **pull + retag images** — `scripts/pull_images.sh` reads
+   `sampled_ids.txt`, then for each ID runs
+   `docker pull ghcr.io/epoch-research/swe-bench.eval.x86_64.<id>:latest`
+   and `docker tag … sweb.eval.x86_64/<sweb.eval.x86_64.<id_1776>>:latest`
+   so the SWE-bench harness can find them locally.
+4. **inference** — `scripts/run_inference.sh` renders
+   `config/mini-swe-agent.local.yaml` with `${VAR}` env-var substitution
+   and calls `mini-extra swebench` with that config + a
+   `sitecustomize.py`-based image-resolver monkey-patch (auto-loaded via
+   `PYTHONPATH=config`). The `--filter` is built from `sampled_ids.txt`.
    Output: `runs/<run_id>/inference/preds.json` + per-instance
    `.traj.json` files.
-4. **local grading** — `scripts/run_evaluation.sh` invokes
+5. **local grading** — `scripts/run_evaluation.sh` invokes
    `python -m swebench.harness.run_evaluation` with
-   `--namespace none --cache_level env` against the same
-   SWE-bench Verified dataset and the same slice. The harness
-   applies the model patch, then the gold test patch, runs the
-   project's own test suite, and writes a per-instance `report.json`.
-5. **report** — `scripts/report.py` aggregates every
-   `report.json` and prints / writes
-   `runs/<run_id>/report.txt` with the headline
-   `resolved: N/M (NN.N%)` number.
+   `--namespace sweb.eval.x86_64 --cache_level env --instance_ids <sampled>`
+   against the same SWE-bench Verified dataset. The harness applies the
+   model patch, then the gold test patch, runs the project's own test
+   suite, and writes a per-instance `report.json`.
+6. **report** — `scripts/report.py` aggregates every `report.json`,
+   computes the Wilson 95% confidence interval on the resolved
+   proportion, and projects the expected score range on the full 500
+   instances. Output goes to stdout and `runs/<run_id>/report.txt`.
 
 ## Configuration
 
@@ -100,29 +112,67 @@ SWEBENCH_SLICE=0:100 SWEBENCH_RUN_ID=full-100-$(date +%s) ./run.sh
 | `LLM_BASE_URL` | `http://10.77.0.2:1234/v1` | OpenAI-compat endpoint |
 | `LLM_API_KEY` | `lm-studio` | Any non-empty string; LM Studio ignores the value |
 | `LLM_MODEL` | (auto from `/v1/models`) | e.g. `openai/deepseek-v4-flash` |
-| `LLM_MAX_CONTEXT` | `131072` | advertised to litellm for context checks |
+| `LLM_MAX_CONTEXT` | `131072` | advertised to litellm for context-window checks |
 | `SWEBENCH_SUBSET` | `verified` | dataset name shorthand |
 | `SWEBENCH_SPLIT` | `test` | dataset split |
-| `SWEBENCH_SLICE` | `0:5` | Python slice of instance indices |
-| `SWEBENCH_WORKERS` | `4` | parallel workers |
-| `SWEBENCH_RUN_ID` | `smoke-<timestamp>` | output directory name |
-| `AGENT_STEP_LIMIT` | `250` | LLM turns per instance |
+| `SWEBENCH_N` | `5` | sample size (number of instances to draw) |
+| `SWEBENCH_SEED` | `1` | random seed for reproducible sampling |
+| `SWEBENCH_WORKERS` | `1` | parallel workers (1 because the local LLM is single-threaded) |
+| `SWEBENCH_RUN_ID` | `smoke` | output directory name under `runs/` |
+| `AGENT_STEP_LIMIT` | `250` | LLM turns per instance (hard cap) |
 | `AGENT_COST_LIMIT` | `3.0` | ignored (cost tracking off) |
+
+## Reproducible sampling
+
+`scripts/sample_instances.py` uses `random.Random(seed).sample(range(500), N)`
+on the test split of `princeton-nlp/SWE-bench_Verified` (after applying the
+`SWEBENCH_SUBSET` mapping). The chosen instance IDs are written to
+`runs/<run_id>/sampled_ids.txt` in dataset order (not draw order), so
+`pull_images.sh`, `run_inference.sh`, and `run_evaluation.sh` all consume
+the same file. Re-running with the same seed and N produces the same sample
+byte-for-byte.
+
+## Confidence interval and projection
+
+`scripts/report.py` uses the [Wilson score interval](https://en.wikipedia.org/wiki/Binomial_proportion_confidence_interval)
+for the resolved proportion (better-behaved than the normal approximation
+for small N and proportions near 0 or 1), and then projects that interval
+onto the full 500-instance SWE-bench Verified set. Example for 2/5
+resolved:
+
+```
+resolved: 2/5  (40.0%)
+
+95% confidence interval (Wilson score):
+  observed: [ 11.8%,  76.9%]
+  expected score on full SWE-bench Verified (500 instances):
+    point estimate: 200/500  (40.0%)
+    95% CI range:   59–384 / 500  (11.8%–76.9%)
+```
+
+The wide CI at N=5 is expected; the projection narrows quickly as N grows
+(roughly ±10% at N=20, ±4% at N=100).
 
 ## Image registry strategy
 
 | Project | Image key |
 |---|---|
-| mini-swe-agent | `docker.io/swebench/sweb.eval.x86_64.<id>:latest`, `__`→`_1776_` |
-| `ghcr.io/epoch-research` | `…/sweb-bench.eval.x86_64.<id>:latest`, `__` preserved |
-| SWE-bench harness | `sweb.eval.<arch>.<id>:latest`, `__`→`_1776_` |
+| mini-swe-agent (default) | `docker.io/swebench/sweb.eval.x86_64.<id>:latest`, `__`→`_1776_` |
+| `ghcr.io/epoch-research` | `…/swe-bench.eval.x86_64.<id>:latest`, `__` preserved |
+| SWE-bench harness (with `namespace` set) | `<namespace>/sweb.eval.<arch>.<id_with_1776>:latest` |
 
-We use `docker pull` + `docker tag` so both tools see a consistent local
-naming scheme; the SWE-bench harness is then run with
-`--namespace none` (use what's on disk, don't try to build/pull from
-a registry). With `--cache_level env` we keep the expensive
-shared base/env images between runs and discard the per-instance
-image afterwards — that's the exact trade-off the
+The rig uses a non-`None` namespace (`sweb.eval.x86_64`) so the harness
+treats the per-instance image as remote and applies the `__`→`_1776_`
+substitution. We then `docker pull` from `ghcr.io/epoch-research` and
+`docker tag` to the namespaced local form
+`sweb.eval.x86_64/sweb.eval.x86_64.<id_1776>:latest`, which is what the
+harness then looks up. (With `--namespace none` the harness instead tries
+to **build** the env images locally, which is not what we want on arm64
+or any non-x86 host.)
+
+With `--cache_level env` we keep the expensive shared base/env images
+between runs and discard the per-instance image afterwards — that's the
+exact trade-off the
 [epoch blog](https://epoch.ai/latest/swebench-docker) recommends
 (≈30 GiB for the full Verified set; ≈62 min on a 32-core machine).
 
