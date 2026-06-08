@@ -74,7 +74,39 @@ def main() -> int:
         (REPO_ROOT / ".env.last_resolved").write_text(f"LLM_MODEL=openai/{chosen}\n")
         print(f"  → auto-resolved LLM_MODEL=openai/{chosen} (first model listed)")
         print(f"  → wrote .env.last_resolved")
+
+    # Always (re)write the litellm cost-registry file with the resolved
+    # model id so litellm does not emit its "Provider List" warning at
+    # every litellm.completion() call. Cost is zero for a local LLM.
+    max_ctx = int(os.environ.get("LLM_MAX_CONTEXT", "131072") or "131072")
+    write_litellm_registry(REPO_ROOT / "config" / "litellm-registry.json", chosen, max_ctx)
+    print(f"  → wrote config/litellm-registry.json with model={chosen}")
     return 0
+
+
+def write_litellm_registry(path: Path, model_id: str, max_tokens: int) -> None:
+    """Write a litellm-compatible model-registry JSON for the local model.
+
+    litellm warns "Provider List: https://docs.litellm.ai/docs/providers"
+    whenever a model is not in its own internal registry. Registering a
+    matching entry silences the warning and lets cost lookups succeed
+    (which keeps the rig compatible with mini-swe-agent's default
+    cost-tracking path; we additionally set MSWEA_COST_TRACKING=ignore_errors
+    to bypass cost lookups entirely).
+    """
+    import json
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        model_id: {
+            "max_tokens": max_tokens,
+            "max_input_tokens": max_tokens,
+            "input_cost_per_token": 0.0,
+            "output_cost_per_token": 0.0,
+            "litellm_provider": "openai",
+            "mode": "chat",
+        }
+    }
+    path.write_text(json.dumps(payload, indent=2) + "\n")
 
 
 if __name__ == "__main__":
