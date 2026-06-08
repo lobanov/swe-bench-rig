@@ -186,6 +186,28 @@ exact trade-off the
 - A local OpenAI-compatible LLM server reachable at `LLM_BASE_URL`,
   serving a model that supports tool/function calling
 
+### aarch64 / Apple-silicon note
+
+The epoch-research Docker images are built for `linux/amd64` only. On an
+`aarch64` host (Apple silicon, AWS Graviton, Raspberry Pi, etc.) Docker
+will automatically run them through `qemu-user-static` emulation. Just
+make sure the host has it installed and registered with binfmt_misc:
+
+```bash
+# Debian / Ubuntu
+sudo apt-get install -y qemu-user-static
+
+# macOS (Docker Desktop, OrbStack, Rancher Desktop): bundled, nothing to do
+
+# Verify
+docker run --rm --platform linux/amd64 alpine uname -m    # → x86_64
+ls /proc/sys/fs/binfmt_misc | grep qemu                    # → qemu-x86_64 (and friends)
+```
+
+Emulation is transparent to the rig (no flags needed) but adds roughly
+5–10× overhead per `docker exec` call. For fastest runs use a native
+x86_64 host; the rig works identically on both.
+
 ## Notes on the `swebench` vendored copy
 
 `uv pip install` from a git source drops the
