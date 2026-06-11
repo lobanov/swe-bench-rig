@@ -29,7 +29,7 @@ See `PLAN.md` for the design and rationale.
 ├── scripts/
 │   ├── setup.sh                         # create venv, install both repos
 │   ├── check_server.py                  # probe LLM, auto-resolve LLM_MODEL, write litellm registry
-│   ├── sample_instances.py              # reproducible random sampling of N instances
+│   ├── sample_instances.py              # pick IDs: --slice M:N | --input-file | --n/--seed
 │   ├── pull_images.sh                   # pull & retag ghcr.io/epoch-research images
 │   ├── _render_yaml.py                  # substitute ${VAR} in mini-swe-agent.local.yaml
 │   ├── run_inference.sh                 # run mini-swe-agent batch on the sample
@@ -73,12 +73,32 @@ $EDITOR .env                 # adjust LLM_BASE_URL, LLM_API_KEY, etc. if needed
 ```
 
 The default scope is a 5-instance smoke test sampled from the 500
-SWE-bench Verified instances with seed=1 (`SWEBENCH_N=5 SWEBENCH_SEED=1`).
+SWE-bench Verified instances (random sample with `SWEBENCH_N=5` and
+`SWEBENCH_SEED=1`). **Three mutually exclusive modes for picking
+instances are supported:**
+
+| Mode | How | When to use |
+|---|---|---|
+| **Contiguous slice** | `SWEBENCH_SLICE=M:N` (Python slice syntax; `:N` and `M:` work too) | Reproducible eval over a specific index range, e.g. `0:5` for smoke or `0:500` for full |
+| **Explicit list** | `SWEBENCH_INPUT_FILE=path/to/ids.txt` (one ID per line) | Hand-curated set, e.g. only the Django bugs you care about |
+| **Random sample** | `SWEBENCH_N=N` + `SWEBENCH_SEED=K` (default mode if the other two are empty) | Reproducible-but-arbitrary subset, e.g. for statistical sampling |
+
 Bump to a real eval with (note: keep `SWEBENCH_WORKERS=1` — the local
 LLM server is single-threaded, parallel requests just queue):
 
 ```bash
-SWEBENCH_N=100 SWEBENCH_SEED=1 SWEBENCH_RUN_ID=full-100-$(date +%s) ./run.sh
+# Full benchmark (deterministic order, 0:500)
+SWEBENCH_SLICE=0:500 SWEBENCH_RUN_ID=full-$(date +%s) ./run.sh
+
+# Custom slice (e.g. instances 50..150)
+SWEBENCH_SLICE=50:150 SWEBENCH_RUN_ID=slice-50-150-$(date +%s) ./run.sh
+
+# Hand-picked list
+echo -e "django__django-11999\nastropy__astropy-13033" > /tmp/my_ids.txt
+SWEBENCH_INPUT_FILE=/tmp/my_ids.txt SWEBENCH_RUN_ID=custom-$(date +%s) ./run.sh
+
+# Random sample (the original behavior)
+SWEBENCH_N=100 SWEBENCH_SEED=1 SWEBENCH_RUN_ID=random-100-$(date +%s) ./run.sh
 ```
 
 ## What `./run.sh` does
@@ -87,10 +107,18 @@ SWEBENCH_N=100 SWEBENCH_SEED=1 SWEBENCH_RUN_ID=full-100-$(date +%s) ./run.sh
    auto-resolves `LLM_MODEL=openai/<first-id>`, and rewrites
    `config/litellm-registry.json` so litellm knows the model. The result
    is written to `.env.last_resolved` and exported to subsequent steps.
-2. **sample instances** — `scripts/sample_instances.py` uses
-   `random.Random(seed).sample(range(500), N)` to pick N reproducible
-   instance IDs from the SWE-bench Verified test split. The list is
-   written to `runs/<run_id>/sampled_ids.txt`.
+2. **sample instances** — `scripts/sample_instances.py` resolves
+   which instance IDs to run, in one of three modes (mutually exclusive,
+   `SWEBENCH_SLICE` wins first, then `SWEBENCH_INPUT_FILE`, then
+   `SWEBENCH_N`/`SWEBENCH_SEED`):
+   - `SWEBENCH_SLICE=M:N` (Python slice syntax; `:N` and `M:` also work)
+     for a deterministic contiguous slice of the dataset.
+   - `SWEBENCH_INPUT_FILE=path` for a hand-curated list of IDs (one per
+     line; the script validates each against the dataset).
+   - `SWEBENCH_N=N` + `SWEBENCH_SEED=K` for a reproducible random sample
+     of N instances (the original default behavior).
+   The chosen IDs are written to `runs/<run_id>/sampled_ids.txt`, one per
+   line, in dataset order.
 3. **pull + retag images** — `scripts/pull_images.sh` reads
    `sampled_ids.txt`, then for each ID runs
    `docker pull ghcr.io/epoch-research/swe-bench.eval.x86_64.<id>:latest`
@@ -137,8 +165,10 @@ SWEBENCH_N=100 SWEBENCH_SEED=1 SWEBENCH_RUN_ID=full-100-$(date +%s) ./run.sh
 | `LLM_MAX_CONTEXT` | `131072` | advertised to litellm for context-window checks |
 | `SWEBENCH_SUBSET` | `verified` | dataset name shorthand |
 | `SWEBENCH_SPLIT` | `test` | dataset split |
-| `SWEBENCH_N` | `5` | sample size (number of instances to draw) |
-| `SWEBENCH_SEED` | `1` | random seed for reproducible sampling |
+| `SWEBENCH_SLICE` | (empty) | contiguous slice of the dataset, e.g. `0:5`, `50:150`, `0:`. Wins over `SWEBENCH_INPUT_FILE` and `SWEBENCH_N`. |
+| `SWEBENCH_INPUT_FILE` | (empty) | path to a newline-delimited list of instance IDs. Validated against the dataset. |
+| `SWEBENCH_N` | `5` | sample size for the random-sample mode (used only when both `SWEBENCH_SLICE` and `SWEBENCH_INPUT_FILE` are empty). |
+| `SWEBENCH_SEED` | `1` | random seed (random-sample mode) |
 | `SWEBENCH_WORKERS` | `1` | parallel workers (1 because the local LLM is single-threaded) |
 | `SWEBENCH_RUN_ID` | `smoke` | output directory name under `runs/` |
 | `AGENT_STEP_LIMIT` | `250` | LLM turns per instance (hard cap) |
@@ -146,13 +176,22 @@ SWEBENCH_N=100 SWEBENCH_SEED=1 SWEBENCH_RUN_ID=full-100-$(date +%s) ./run.sh
 
 ## Reproducible sampling
 
-`scripts/sample_instances.py` uses `random.Random(seed).sample(range(500), N)`
-on the test split of `princeton-nlp/SWE-bench_Verified` (after applying the
-`SWEBENCH_SUBSET` mapping). The chosen instance IDs are written to
+`scripts/sample_instances.py` resolves the instance set in one of three
+mutually-exclusive modes (see the "Configuration" table above):
+
+- `--slice M:N` produces a deterministic contiguous slice (`ds[M:N]`).
+- `--input-file path` reads newline-delimited instance IDs from a file
+  and validates each against the dataset (unknown IDs abort with an
+  error). Output is sorted in dataset order.
+- `--n N --seed K` produces a reproducible random sample of N instances
+  using `random.Random(K).sample(range(500), N)`.
+
+In every mode, the chosen instance IDs are written to
 `runs/<run_id>/sampled_ids.txt` in dataset order (not draw order), so
 `pull_images.sh`, `run_inference.sh`, and `run_evaluation.sh` all consume
-the same file. Re-running with the same seed and N produces the same sample
-byte-for-byte.
+the same file. Re-running with the same `SWEBENCH_SLICE` (or the same
+`SWEBENCH_N` + `SWEBENCH_SEED`) produces the same sample byte-for-byte.
+The mode label is captured to `runs/<run_id>/sample.log` for post-mortem.
 
 ## Confidence interval and projection
 

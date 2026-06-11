@@ -27,8 +27,9 @@ if [[ ! -f .env ]]; then
 fi
 
 # Source .env only if the run-shaping vars aren't already in the environment,
-# so that cmdline overrides like `SWEBENCH_N=3 SWEBENCH_SEED=7 ./run.sh` win
-# over .env's defaults. We source line-by-line and only export vars that are
+# so that cmdline overrides like `SWEBENCH_SLICE=0:5 ./run.sh` (or
+# `SWEBENCH_N=3 SWEBENCH_SEED=7` for the random-sample mode) win over
+# .env's defaults. We source line-by-line and only export vars that are
 # NOT already set in the environment, so a partial cmdline override
 # (e.g. only SWEBENCH_N=3) is filled in with the rest of .env's defaults
 # (LLM_BASE_URL, LLM_API_KEY, ...) without clobbering the override.

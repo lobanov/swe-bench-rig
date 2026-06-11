@@ -44,6 +44,8 @@ export SWEBENCH_RUN_ID
 : "${SWEBENCH_SPLIT:=test}"
 : "${SWEBENCH_SEED:=1}"
 : "${SWEBENCH_N:=5}"
+: "${SWEBENCH_SLICE:=}"
+: "${SWEBENCH_INPUT_FILE:=}"
 : "${SWEBENCH_WORKERS:=1}"
 
 ARCH="x86_64"
@@ -55,20 +57,37 @@ RUN_DIR="runs/${SWEBENCH_RUN_ID}"
 mkdir -p "$RUN_DIR"
 SAMPLE_FILE="$RUN_DIR/sampled_ids.txt"
 
-# Resolve the sampled instance IDs.
-.venv/bin/python scripts/sample_instances.py \
-    --subset "$SWEBENCH_SUBSET" --split "$SWEBENCH_SPLIT" \
-    --n "$SWEBENCH_N" --seed "$SWEBENCH_SEED" \
-    > "$SAMPLE_FILE" 2>/dev/null
+# Resolve the sampled instance IDs. Three modes (mutually exclusive):
+#   SWEBENCH_SLICE=M:N     — deterministic contiguous slice of the dataset
+#   SWEBENCH_INPUT_FILE=…  — explicit newline-delimited list
+#   SWEBENCH_N=N (default) — random sample of N (with SWEBENCH_SEED)
+SAMPLE_ARGS=(
+    --subset "$SWEBENCH_SUBSET"
+    --split  "$SWEBENCH_SPLIT"
+)
+if [[ -n "$SWEBENCH_SLICE" ]]; then
+    SAMPLE_ARGS+=(--slice "$SWEBENCH_SLICE")
+    MODE_LABEL="slice=${SWEBENCH_SLICE}"
+elif [[ -n "$SWEBENCH_INPUT_FILE" ]]; then
+    SAMPLE_ARGS+=(--input-file "$SWEBENCH_INPUT_FILE")
+    MODE_LABEL="input-file=${SWEBENCH_INPUT_FILE}"
+else
+    SAMPLE_ARGS+=(--n "$SWEBENCH_N" --seed "$SWEBENCH_SEED")
+    MODE_LABEL="seed=${SWEBENCH_SEED} n=${SWEBENCH_N}"
+fi
+
+# Stderr carries the mode label; stdout is the IDs. Redirect both.
+.venv/bin/python scripts/sample_instances.py "${SAMPLE_ARGS[@]}" \
+    > "$SAMPLE_FILE" 2>"$RUN_DIR/sample.log"
 
 COUNT=$(wc -l < "$SAMPLE_FILE" | tr -d ' ')
-echo "→ pre-staging ${COUNT} image(s) from ${REMOTE_NAMESPACE} (seed=${SWEBENCH_SEED} n=${SWEBENCH_N})"
+echo "→ pre-staging ${COUNT} image(s) from ${REMOTE_NAMESPACE} (${MODE_LABEL})"
 sed 's/^/    - /' "$SAMPLE_FILE"
 
 # Pull + retag, skipping ones that are already in place. Tee all output
 # to runs/<run_id>/pull.log for post-mortem.
 exec >"$RUN_DIR/pull.log" 2>&1
-echo "→ pre-staging ${COUNT} image(s) from ${REMOTE_NAMESPACE} (seed=${SWEBENCH_SEED} n=${SWEBENCH_N})"
+echo "→ pre-staging ${COUNT} image(s) from ${REMOTE_NAMESPACE} (${MODE_LABEL})"
 sed 's/^/    - /' "$SAMPLE_FILE"
 
 while read -r id; do
