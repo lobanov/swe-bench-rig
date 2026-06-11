@@ -28,17 +28,25 @@ See `PLAN.md` for the design and rationale.
 │   └── sitecustomize.py                 # auto-loaded image-resolver monkey-patch
 ├── scripts/
 │   ├── setup.sh                         # create venv, install both repos
-│   ├── check_server.py                  # probe LLM, auto-resolve LLM_MODEL
+│   ├── check_server.py                  # probe LLM, auto-resolve LLM_MODEL, write litellm registry
 │   ├── sample_instances.py              # reproducible random sampling of N instances
 │   ├── pull_images.sh                   # pull & retag ghcr.io/epoch-research images
+│   ├── _render_yaml.py                  # substitute ${VAR} in mini-swe-agent.local.yaml
 │   ├── run_inference.sh                 # run mini-swe-agent batch on the sample
 │   ├── run_evaluation.sh                # run SWE-bench harness local grading
 │   └── report.py                        # summarise results with Wilson 95% CI
+├── config/
+│   ├── mini-swe-agent.local.yaml        # mini-swe-agent config wired to local LLM
+│   ├── litellm-registry.json            # cost-tracking stub, rewritten by check_server.py
+│   └── sitecustomize.py                 # auto-loaded image-resolver patch + litellm silence
 ├── vendor/swebench/                     # swebench editable install (one-time clone)
 ├── runs/                                # all run artifacts (gitignored)
 │   └── <run_id>/
 │       ├── sampled_ids.txt              # the exact instances picked by the seed
-│       ├── inference/                   # mini-swe-agent preds.json + trajectories
+│       ├── pull.log                     # docker pull + retag log
+│       ├── inference.log                # mini-swe-agent run log
+│       ├── eval.log                     # swebench harness grading log
+│       ├── inference/                   # preds.json + per-instance .traj.json
 │       ├── evaluation/                  # swebench harness logs + report
 │       └── report.txt                   # human-readable summary with CI
 └── run.sh                               # end-to-end entry point
@@ -73,9 +81,10 @@ SWEBENCH_N=100 SWEBENCH_SEED=1 SWEBENCH_RUN_ID=full-100-$(date +%s) ./run.sh
 
 ## What `./run.sh` does
 
-1. **probe LLM** — `scripts/check_server.py` calls `GET {LLM_BASE_URL}/models`
-   and auto-resolves `LLM_MODEL=openai/<first-id>`. The result is written
-   to `.env.last_resolved` and exported to subsequent steps.
+1. **probe LLM** — `scripts/check_server.py` calls `GET {LLM_BASE_URL}/models`,
+   auto-resolves `LLM_MODEL=openai/<first-id>`, and rewrites
+   `config/litellm-registry.json` so litellm knows the model. The result
+   is written to `.env.last_resolved` and exported to subsequent steps.
 2. **sample instances** — `scripts/sample_instances.py` uses
    `random.Random(seed).sample(range(500), N)` to pick N reproducible
    instance IDs from the SWE-bench Verified test split. The list is
@@ -84,24 +93,28 @@ SWEBENCH_N=100 SWEBENCH_SEED=1 SWEBENCH_RUN_ID=full-100-$(date +%s) ./run.sh
    `sampled_ids.txt`, then for each ID runs
    `docker pull ghcr.io/epoch-research/swe-bench.eval.x86_64.<id>:latest`
    and `docker tag … sweb.eval.x86_64/<sweb.eval.x86_64.<id_1776>>:latest`
-   so the SWE-bench harness can find them locally.
+   so the SWE-bench harness can find them locally. Output logged to
+   `runs/<run_id>/pull.log`.
 4. **inference** — `scripts/run_inference.sh` renders
-   `config/mini-swe-agent.local.yaml` with `${VAR}` env-var substitution
-   and calls `mini-extra swebench` with that config + a
-   `sitecustomize.py`-based image-resolver monkey-patch (auto-loaded via
-   `PYTHONPATH=config`). The `--filter` is built from `sampled_ids.txt`.
-   Output: `runs/<run_id>/inference/preds.json` + per-instance
-   `.traj.json` files.
+   `config/mini-swe-agent.local.yaml` (via `scripts/_render_yaml.py`) and
+   calls `mini-extra swebench` with that config + a `sitecustomize.py`
+   image-resolver monkey-patch (auto-loaded via `PYTHONPATH=config`).
+   The `--filter` is built from `sampled_ids.txt`. Output:
+   `runs/<run_id>/inference/preds.json` + per-instance `.traj.json`
+   files; run log to `runs/<run_id>/inference.log`.
 5. **local grading** — `scripts/run_evaluation.sh` invokes
    `python -m swebench.harness.run_evaluation` with
    `--namespace sweb.eval.x86_64 --cache_level env --instance_ids <sampled>`
-   against the same SWE-bench Verified dataset. The harness applies the
-   model patch, then the gold test patch, runs the project's own test
-   suite, and writes a per-instance `report.json`.
+   against the same SWE-bench Verified dataset. Instances with an
+   existing `report.json` from a prior run are auto-skipped
+   (so a re-invocation resumes instead of re-grading). Run log to
+   `runs/<run_id>/eval.log`.
 6. **report** — `scripts/report.py` aggregates every `report.json`,
    computes the Wilson 95% confidence interval on the resolved
-   proportion, and projects the expected score range on the full 500
-   instances. Output goes to stdout and `runs/<run_id>/report.txt`.
+   proportion, projects the expected score range on the full 500
+   instances, and (when available) reports token totals from
+   mini-swe-agent trajectories. Output goes to stdout and
+   `runs/<run_id>/report.txt`.
 
 ## Configuration
 

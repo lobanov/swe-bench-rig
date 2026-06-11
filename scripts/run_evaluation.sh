@@ -16,23 +16,36 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source .venv/bin/activate
-# Source .env but do NOT overwrite variables already in the environment
-# (so that cmdline `SWEBENCH_RUN_ID=foo ./run.sh` wins over .env's default).
-if [[ -z "${SWEBENCH_RUN_ID:-}" || "${SWEBENCH_RUN_ID}" == "smoke" ]]; then
-    set -a; source .env; set +a
-    [[ -f .env.last_resolved ]] && set -a && source .env.last_resolved && set +a
-    : "${SWEBENCH_RUN_ID:=smoke-$(date +%Y%m%d-%H%M%S)}"
-    export SWEBENCH_RUN_ID
-fi
-# Defaults for vars not in .env (so `set -u` is happy)
+export PYTHONPATH="$(pwd)/config${PYTHONPATH:+:$PYTHONPATH}"
+export MSWEA_SILENT_STARTUP=1
+
+# Source .env line-by-line, only exporting vars not already in the
+# environment. Lets cmdline overrides win while still filling in
+# defaults for unset vars. LLM_MODEL is left for check_server.
+while IFS='=' read -r key val; do
+    [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
+    [[ "$key" == "LLM_MODEL" ]] && continue
+    # Strip trailing inline `# comment` (bash assignment rule)
+    val="${val%%#*}"
+    val="${val%"${val##*[![:space:]]}"}"
+    if [[ -z "${!key:-}" ]]; then
+        export "$key=$val"
+    fi
+done < <(grep -E '^[A-Z_][A-Z0-9_]*=' .env)
+[[ -f .env.last_resolved ]] && source .env.last_resolved
+: "${SWEBENCH_RUN_ID:=smoke-$(date +%Y%m%d-%H%M%S)}"
+export SWEBENCH_RUN_ID
 : "${SWEBENCH_SPLIT:=test}"
-: "${SWEBENCH_WORKERS:=2}"
+: "${SWEBENCH_WORKERS:=1}"
 
 # Must match LOCAL_NAMESPACE in pull_images.sh.
 EVAL_NAMESPACE="sweb.eval.x86_64"
 
-INFER_DIR="runs/${SWEBENCH_RUN_ID}/inference"
-EVAL_DIR="runs/${SWEBENCH_RUN_ID}/evaluation"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+INFER_DIR="$REPO_ROOT/runs/${SWEBENCH_RUN_ID}/inference"
+EVAL_DIR="$REPO_ROOT/runs/${SWEBENCH_RUN_ID}/evaluation"
+RUN_DIR="$REPO_ROOT/runs/${SWEBENCH_RUN_ID}"
+SAMPLE_FILE="$RUN_DIR/sampled_ids.txt"
 
 if [[ ! -f "$INFER_DIR/preds.json" ]]; then
     echo "✗ $INFER_DIR/preds.json not found; run scripts/run_inference.sh first" >&2
@@ -40,9 +53,18 @@ if [[ ! -f "$INFER_DIR/preds.json" ]]; then
 fi
 
 mkdir -p "$EVAL_DIR"
-cd "$EVAL_DIR"
 
-python -c "
+# Cross-check: warn if sampled_ids.txt differs from the IDs in preds.json.
+if [[ -f "$SAMPLE_FILE" ]]; then
+    SAMPLED=$(sort "$SAMPLE_FILE" | paste -sd, -)
+    PREDICTED=$("$REPO_ROOT/.venv/bin/python" -c "import json; print(','.join(sorted(json.load(open('$INFER_DIR/preds.json')).keys())))")
+    if [[ "$SAMPLED" != "$PREDICTED" ]]; then
+        echo "⚠ sampled_ids.txt differs from predictions — eval will use predictions only" >&2
+    fi
+fi
+
+cd "$EVAL_DIR"
+"$REPO_ROOT/.venv/bin/python" -c "
 import json
 d = json.load(open('../inference/preds.json'))
 for v in d.values():
@@ -50,25 +72,42 @@ for v in d.values():
 " > preds.jsonl
 
 # Restrict the harness to the same sampled IDs (paranoia: even if preds.jsonl
-# contained extras, the harness would still process them, but this keeps
-# logs/sandbox work to the minimum).
-SAMPLE_FILE="runs/${SWEBENCH_RUN_ID}/sampled_ids.txt"
+# contained extras, the harness would still process them).
 SAMPLED_IDS=()
 if [[ -f "$SAMPLE_FILE" ]]; then
     while read -r line; do SAMPLED_IDS+=("$line"); done < "$SAMPLE_FILE"
 fi
 
-echo "→ predictions: $(wc -l < preds.jsonl) lines"
-echo "→ dataset:     princeton-nlp/SWE-bench_Verified (${SWEBENCH_SPLIT})"
-echo "→ namespace:   ${EVAL_NAMESPACE}  (use locally retagged images)"
-echo "→ cache_level: env   (keep base+env, drop per-instance)"
+# Skip instances that already have a report.json from a previous run.
+SKIPPED=()
+TO_RUN=()
+for id in "${SAMPLED_IDS[@]}"; do
+    rj="logs/run_evaluation/${SWEBENCH_RUN_ID}/openai__deepseek-v4-flash/${id}/report.json"
+    if [[ -f "$rj" ]]; then
+        SKIPPED+=("$id")
+    else
+        TO_RUN+=("$id")
+    fi
+done
+echo "→ predictions:  $(wc -l < preds.jsonl) total"
+echo "→ dataset:      princeton-nlp/SWE-bench_Verified (${SWEBENCH_SPLIT})"
+echo "→ namespace:    ${EVAL_NAMESPACE}  (use locally retagged images)"
+echo "→ cache_level:  env   (keep base+env, drop per-instance)"
+echo "→ sample size:  ${#SAMPLED_IDS[@]};  already graded: ${#SKIPPED[@]};  to run: ${#TO_RUN[@]}"
 
-# Build the --instance_ids arg only if we have a sample file
-if [[ ${#SAMPLED_IDS[@]} -gt 0 ]]; then
-    INSTANCE_ID_ARGS=(--instance_ids "${SAMPLED_IDS[@]}")
-else
-    INSTANCE_ID_ARGS=()
+if [[ ${#TO_RUN[@]} -eq 0 ]]; then
+    echo "→ nothing to do"
+    cd "$RUN_DIR" && .venv/bin/python scripts/report.py "$RUN_DIR"
+    exit 0
 fi
+
+exec >"$RUN_DIR/eval.log" 2>&1
+echo "→ predictions:  $(wc -l < preds.jsonl) total"
+echo "→ dataset:      princeton-nlp/SWE-bench_Verified (${SWEBENCH_SPLIT})"
+echo "→ namespace:    ${EVAL_NAMESPACE}  (use locally retagged images)"
+echo "→ cache_level:  env   (keep base+env, drop per-instance)"
+echo "→ already graded (skipping): ${SKIPPED[*]:-none}"
+echo "→ to run: ${TO_RUN[*]}"
 
 python -m swebench.harness.run_evaluation \
     --dataset_name     princeton-nlp/SWE-bench_Verified \
@@ -80,4 +119,4 @@ python -m swebench.harness.run_evaluation \
     --max_workers      "$SWEBENCH_WORKERS" \
     --timeout          1800 \
     --report_dir       . \
-    "${INSTANCE_ID_ARGS[@]}"
+    --instance_ids "${TO_RUN[@]}"

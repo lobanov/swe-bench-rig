@@ -5,7 +5,7 @@ agent:
 environment:
   environment_class: docker
   cwd: /testbed
-  timeout: 120
+  timeout: 300
 
 model:
   model_name: ${LLM_MODEL}

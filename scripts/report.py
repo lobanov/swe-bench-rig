@@ -34,6 +34,53 @@ def wilson_ci(x: int, n: int, z: float = Z_95) -> tuple[float, float, float]:
     return (p_hat, max(0.0, centre - half), min(1.0, centre + half))
 
 
+def find_log_root(run_dir: Path) -> Path | None:
+    """Locate the swebench-harness log root for this run.
+
+    The harness writes per-instance artifacts under
+    logs/run_evaluation/<model>/<id>/report.json. The model name is taken
+    from preds.json (we read it from there), not from run_id, so the
+    search is robust to changes in the harness layout.
+    """
+    candidates = [
+        run_dir / "evaluation" / "logs" / "run_evaluation",
+        run_dir / "evaluation" / "evaluation_results",
+    ]
+    return next((p for p in candidates if p.exists()), None)
+
+
+def find_reports(log_root: Path, model_slug: str | None) -> list[Path]:
+    """Return per-instance report.json paths under log_root.
+
+    The harness layout is logs/run_evaluation/<model>/<id>/report.json. If
+    model_slug is provided, we constrain the search to that subtree to
+    avoid picking up reports from other runs sharing the same eval dir.
+    """
+    search_root = log_root / model_slug if model_slug else log_root
+    if not search_root.exists():
+        return sorted(log_root.rglob("report.json"))
+    return sorted(search_root.rglob("report.json"))
+
+
+def read_pred_trajectory_tokens(run_dir: Path, instance_id: str) -> tuple[int | None, int | None]:
+    """Read prompt/completion token counts from a mini-swe-agent trajectory."""
+    traj = run_dir / "inference" / instance_id / f"{instance_id}.traj.json"
+    if not traj.exists():
+        return (None, None)
+    try:
+        d = json.loads(traj.read_text())
+    except Exception:
+        return (None, None)
+    # mini-swe-agent records the response under info._sa_summary or in the
+    # last message's 'extra' field with a 'response' from litellm
+    last = d.get("messages", [])[-1] if d.get("messages") else {}
+    extra = last.get("extra", {}) if isinstance(last, dict) else {}
+    usage = (extra.get("response") or {}).get("usage") or {}
+    p = usage.get("prompt_tokens")
+    c = usage.get("completion_tokens")
+    return (p, c)
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         print("usage: report.py runs/<run_id>", file=sys.stderr)
@@ -44,26 +91,34 @@ def main() -> int:
         print(f"✗ {run_dir} is not a directory", file=sys.stderr)
         return 1
 
-    candidates = [
-        run_dir / "evaluation" / "logs" / "run_evaluation" / run_dir.name,
-        run_dir / "evaluation" / "logs" / "run_evaluation",
-        run_dir / "evaluation" / "evaluation_results",
-    ]
-    log_root = next((p for p in candidates if p.exists()), None)
+    log_root = find_log_root(run_dir)
     if log_root is None:
         print(f"✗ could not find log root under {run_dir}/evaluation", file=sys.stderr)
-        for p in candidates:
-            print(f"    - {p}", file=sys.stderr)
         return 1
 
-    reports = sorted(log_root.rglob("report.json"))
+    # Try to figure out the model slug used by the harness from preds.json,
+    # so we only pick up this run's report.json files.
+    model_slug: str | None = None
+    preds_path = run_dir / "inference" / "preds.json"
+    if preds_path.exists():
+        try:
+            d = json.loads(preds_path.read_text())
+            first = next(iter(d.values()), {})
+            name = first.get("model_name_or_path")
+            if name:
+                model_slug = str(name).replace("/", "__")
+        except Exception:
+            pass
+
+    reports = find_reports(log_root, model_slug)
     if not reports:
-        print(f"✗ no report.json files under {log_root}", file=sys.stderr)
+        print(f"✗ no report.json files under {log_root}{'/'+model_slug if model_slug else ''}",
+              file=sys.stderr)
         return 1
 
     resolved = 0
     total = 0
-    per_instance: list[tuple[str, bool, str]] = []
+    per_instance: list[tuple[str, bool, str, int | None, int | None]] = []
     for rp in reports:
         d = json.loads(rp.read_text())
         for inst_id, r in d.items():
@@ -71,15 +126,20 @@ def main() -> int:
             ok = bool(r.get("resolved"))
             if ok:
                 resolved += 1
-            per_instance.append((inst_id, ok, "?"))
+            p_tok, c_tok = read_pred_trajectory_tokens(run_dir, inst_id)
+            per_instance.append((inst_id, ok, "?", p_tok, c_tok))
 
     pct, lo, hi = wilson_ci(resolved, total)
     n_completed = total
     n_missing = max(0, VERIFIED_TOTAL - n_completed)
     expected_low = math.ceil(lo * VERIFIED_TOTAL)
     expected_high = math.floor(hi * VERIFIED_TOTAL)
-    # expected point estimate (using point p_hat, not the centre of the CI)
     expected_point = round(pct * VERIFIED_TOTAL)
+
+    # Token totals
+    total_p = sum(p for _, _, _, p, _ in per_instance if p is not None)
+    total_c = sum(c for _, _, _, _, c in per_instance if c is not None)
+    have_tokens = any(p is not None for _, _, _, p, _ in per_instance)
 
     lines: list[str] = []
     lines.append(f"=== {run_dir.name} ===")
@@ -96,11 +156,21 @@ def main() -> int:
         lines.append(f"        at the same rate as the {n_completed} completed; widen the CI for the")
         lines.append(f"        full set to roughly  ±{1.96*math.sqrt(VERIFIED_TOTAL*0.25)/VERIFIED_TOTAL*100:.1f}%")
         lines.append(f"        (worst-case 50% prior).")
+    if have_tokens:
+        lines.append("")
+        lines.append(f"tokens (from mini-swe-agent trajectories):")
+        lines.append(f"  prompt:     {total_p:>9,}")
+        lines.append(f"  completion: {total_c:>9,}")
+        lines.append(f"  total:      {total_p + total_c:>9,}  "
+                     f"(≈ {(total_p + total_c) / max(1,total):,.0f} tok/instance)")
     lines.append("")
     lines.append("per-instance:")
-    for inst_id, ok, _ in per_instance:
+    for inst_id, ok, _, p_tok, c_tok in per_instance:
         mark = "✓" if ok else "✗"
-        lines.append(f"  {mark} {inst_id}")
+        tok = ""
+        if p_tok is not None and c_tok is not None:
+            tok = f"  [{p_tok + c_tok:>6,} tok]"
+        lines.append(f"  {mark} {inst_id}{tok}")
 
     report_text = "\n".join(lines) + "\n"
     print(report_text)

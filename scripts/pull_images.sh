@@ -21,12 +21,25 @@ cd "$(dirname "$0")/.."
 source .venv/bin/activate
 export PYTHONPATH="$(pwd)/config${PYTHONPATH:+:$PYTHONPATH}"
 export MSWEA_SILENT_STARTUP=1
-# Source .env but do NOT overwrite variables already in the environment
-# (so that cmdline `SWEBENCH_SEED=2 ./run.sh` wins over .env's default).
-if [[ -z "${SWEBENCH_SEED:-}" || -z "${LLM_BASE_URL:-}" ]]; then
-    set -a; source .env; set +a
-    [[ -f .env.last_resolved ]] && set -a && source .env.last_resolved && set +a
-fi
+
+# Source .env line-by-line, only exporting vars not already in the
+# environment. This lets cmdline overrides like
+# `SWEBENCH_SEED=2 SWEBENCH_N=100 ./run.sh` win over .env's defaults
+# for the cmdline-set vars while still pulling in defaults (e.g.
+# LLM_BASE_URL) for vars the caller didn't set.
+while IFS='=' read -r key val; do
+    [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
+    [[ "$key" == "LLM_MODEL" ]] && continue   # LLM_MODEL is set by check_server from /v1/models
+    # Strip trailing inline `# comment` (bash assignment rule)
+    val="${val%%#*}"
+    val="${val%"${val##*[![:space:]]}"}"
+    if [[ -z "${!key:-}" ]]; then
+        export "$key=$val"
+    fi
+done < <(grep -E '^[A-Z_][A-Z0-9_]*=' .env)
+[[ -f .env.last_resolved ]] && source .env.last_resolved
+: "${SWEBENCH_RUN_ID:=smoke-$(date +%Y%m%d-%H%M%S)}"
+export SWEBENCH_RUN_ID
 : "${SWEBENCH_SUBSET:=verified}"
 : "${SWEBENCH_SPLIT:=test}"
 : "${SWEBENCH_SEED:=1}"
@@ -38,16 +51,23 @@ REMOTE_NAMESPACE="ghcr.io/epoch-research"
 LOCAL_NAMESPACE="sweb.eval.x86_64"   # must match run_evaluation.sh
 DATASET_NAME="princeton-nlp/SWE-bench_Verified"
 
-mkdir -p "runs/${SWEBENCH_RUN_ID:-}"
-SAMPLE_FILE="runs/${SWEBENCH_RUN_ID}/sampled_ids.txt"
+RUN_DIR="runs/${SWEBENCH_RUN_ID}"
+mkdir -p "$RUN_DIR"
+SAMPLE_FILE="$RUN_DIR/sampled_ids.txt"
 
 # Resolve the sampled instance IDs.
-python scripts/sample_instances.py \
+.venv/bin/python scripts/sample_instances.py \
     --subset "$SWEBENCH_SUBSET" --split "$SWEBENCH_SPLIT" \
     --n "$SWEBENCH_N" --seed "$SWEBENCH_SEED" \
     > "$SAMPLE_FILE" 2>/dev/null
 
 COUNT=$(wc -l < "$SAMPLE_FILE" | tr -d ' ')
+echo "→ pre-staging ${COUNT} image(s) from ${REMOTE_NAMESPACE} (seed=${SWEBENCH_SEED} n=${SWEBENCH_N})"
+sed 's/^/    - /' "$SAMPLE_FILE"
+
+# Pull + retag, skipping ones that are already in place. Tee all output
+# to runs/<run_id>/pull.log for post-mortem.
+exec >"$RUN_DIR/pull.log" 2>&1
 echo "→ pre-staging ${COUNT} image(s) from ${REMOTE_NAMESPACE} (seed=${SWEBENCH_SEED} n=${SWEBENCH_N})"
 sed 's/^/    - /' "$SAMPLE_FILE"
 
@@ -65,6 +85,5 @@ while read -r id; do
     echo "  ✓ $dst"
 done < "$SAMPLE_FILE"
 
-echo "→ verifying"
-docker images --format '{{.Repository}}:{{.Tag}}' | grep "^${LOCAL_NAMESPACE}/" | sed 's/^/    /'
 echo "→ sampled IDs saved to: $SAMPLE_FILE"
+echo "→ final image count: $(docker images --format '{{.Repository}}:{{.Tag}}' | grep -c "^${LOCAL_NAMESPACE}/")"
