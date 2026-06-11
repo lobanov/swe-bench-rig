@@ -50,7 +50,7 @@ done < <(grep -E '^[A-Z_][A-Z0-9_]*=' .env)
 export SWEBENCH_RUN_ID
 
 echo
-echo "═══ step 1/6  probe LLM ═══════════════════════════════════════"
+echo "═══ step 1/7  probe LLM ═══════════════════════════════════════"
 .venv/bin/python scripts/check_server.py
 [[ -f .env.last_resolved ]] && set -a && source .env.last_resolved && set +a
 
@@ -74,7 +74,7 @@ if [[ "${SKIP_AMD64_PROBE:-}" != "1" ]]; then
         fi
     fi
     echo
-    echo "═══ step 2/6  amd64 probe (qemu-user-static) ════════════════"
+    echo "═══ step 2/7  amd64 probe (qemu-user-static) ════════════════"
     echo "    docker run --rm --platform linux/amd64 ${MSWEA_AMD64_PROBE_IMAGE} uname -m"
     if ! probe_out=$(timeout 60 docker run --rm --platform linux/amd64 \
             "${MSWEA_AMD64_PROBE_IMAGE}" uname -m 2>&1); then
@@ -103,17 +103,21 @@ if [[ "${SKIP_AMD64_PROBE:-}" != "1" ]]; then
 fi
 
 echo
-echo "═══ step 3/6  pull + retag Docker images ═════════════════════"
+echo "═══ step 3/7  pull + retag Docker images ═════════════════════"
 ./scripts/pull_images.sh
 
 echo
-echo "═══ step 4/6  inference (mini-swe-agent) ═════════════════════"
+echo "═══ step 4/7  inference (mini-swe-agent) ═════════════════════"
 ./scripts/run_inference.sh
 
 echo
-echo "═══ step 5/6  local grading (swebench harness) ════════════════"
+echo "═══ step 5/7  local grading (swebench harness) ════════════════"
 ./scripts/run_evaluation.sh
 
 echo
-echo "═══ step 6/6  report ══════════════════════════════════════════"
+echo "═══ step 6/7  report ══════════════════════════════════════════"
 .venv/bin/python scripts/report.py "runs/${SWEBENCH_RUN_ID}"
+
+echo
+echo "═══ step 7/7  per-instance CSV ═══════════════════════════════"
+.venv/bin/python scripts/run_to_csv.py "runs/${SWEBENCH_RUN_ID}"

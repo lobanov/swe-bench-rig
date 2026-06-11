@@ -34,6 +34,7 @@ See `PLAN.md` for the design and rationale.
 │   ├── _render_yaml.py                  # substitute ${VAR} in mini-swe-agent.local.yaml
 │   ├── run_inference.sh                 # run mini-swe-agent batch on the sample
 │   ├── run_evaluation.sh                # run SWE-bench harness local grading
+│   ├── run_to_csv.py                    # export per-instance metrics to results.csv
 │   └── report.py                        # summarise results with Wilson 95% CI
 ├── config/
 │   ├── mini-swe-agent.local.yaml        # mini-swe-agent config wired to local LLM
@@ -48,7 +49,8 @@ See `PLAN.md` for the design and rationale.
 │       ├── eval.log                     # swebench harness grading log
 │       ├── inference/                   # preds.json + per-instance .traj.json
 │       ├── evaluation/                  # swebench harness logs + report
-│       └── report.txt                   # human-readable summary with CI
+│       ├── report.txt                   # human-readable summary with CI
+│       └── results.csv                  # per-instance metrics: pass, llm time, tokens
 └── run.sh                               # end-to-end entry point
 ```
 
@@ -110,11 +112,18 @@ SWEBENCH_N=100 SWEBENCH_SEED=1 SWEBENCH_RUN_ID=full-100-$(date +%s) ./run.sh
    (so a re-invocation resumes instead of re-grading). Run log to
    `runs/<run_id>/eval.log`.
 6. **report** — `scripts/report.py` aggregates every `report.json`,
-   computes the Wilson 95% confidence interval on the resolved
-   proportion, projects the expected score range on the full 500
-   instances, and (when available) reports token totals from
-   mini-swe-agent trajectories. Output goes to stdout and
-   `runs/<run_id>/report.txt`.
+    computes the Wilson 95% confidence interval on the resolved
+    proportion, projects the expected score range on the full 500
+    instances, and (when available) reports token totals from
+    mini-swe-agent trajectories. Output goes to stdout and
+    `runs/<run_id>/report.txt`.
+7. **per-instance CSV** — `scripts/run_to_csv.py` emits
+    `runs/<run_id>/results.csv` with one row per instance:
+    `instance_id, pass, inference_time_sec, llm_time_sec,
+    llm_calls_count, llm_prompt_tokens_count,
+    llm_cached_prompt_tokens_count, llm_completion_tokens_count`.
+    `pass` is read from the harness's `report.json` (instances the
+    harness skipped, e.g. empty-patch, get `pass=False`).
 
 ## Configuration
 
