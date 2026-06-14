@@ -19,6 +19,23 @@ source .venv/bin/activate
 export PYTHONPATH="$(pwd)/config${PYTHONPATH:+:$PYTHONPATH}"
 export MSWEA_SILENT_STARTUP=1
 
+# This script does `exec >eval.log 2>&1` below to capture harness
+# output, which also swallows any fatal error from the terminal. Define
+# an ERR handler that writes diagnostics to fd 3 (the original stderr,
+# captured just before the exec) so a failure here is visible and
+# points at the captured log.
+on_err() {
+    local exit_code=$?
+    local line_no=${BASH_LINENO[0]}
+    echo "✗ $0: command failed (exit $exit_code) at line $line_no" >&3
+    echo "    last command: ${BASH_COMMAND}" >&3
+    if [[ -n "${LOG_FILE:-}" ]] && [[ -f "$LOG_FILE" ]]; then
+        echo "--- tail of $LOG_FILE ---" >&3
+        tail -n 30 "$LOG_FILE" >&3
+        echo "--- end tail ---" >&3
+    fi
+}
+
 # Source .env line-by-line, only exporting vars not already in the
 # environment. Lets cmdline overrides win while still filling in
 # defaults for unset vars. LLM_MODEL is left for check_server.
@@ -97,11 +114,15 @@ echo "→ sample size:  ${#SAMPLED_IDS[@]};  already graded: ${#SKIPPED[@]};  to
 
 if [[ ${#TO_RUN[@]} -eq 0 ]]; then
     echo "→ nothing to do"
-    cd "$RUN_DIR" && .venv/bin/python scripts/report.py "$RUN_DIR"
+    "$REPO_ROOT/.venv/bin/python" "$REPO_ROOT/scripts/report.py" "$RUN_DIR"
     exit 0
 fi
 
-exec >"$RUN_DIR/eval.log" 2>&1
+LOG_FILE="$RUN_DIR/eval.log"
+exec 3>&2  # preserve original stderr for the ERR trap (must precede
+           # the redirect below, otherwise fd 3 would point at eval.log)
+exec >"$LOG_FILE" 2>&1
+trap 'on_err' ERR
 echo "→ predictions:  $(wc -l < preds.jsonl) total"
 echo "→ dataset:      princeton-nlp/SWE-bench_Verified (${SWEBENCH_SPLIT})"
 echo "→ namespace:    ${EVAL_NAMESPACE}  (use locally retagged images)"

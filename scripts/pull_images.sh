@@ -22,6 +22,25 @@ source .venv/bin/activate
 export PYTHONPATH="$(pwd)/config${PYTHONPATH:+:$PYTHONPATH}"
 export MSWEA_SILENT_STARTUP=1
 
+# `pull_images.sh` does `exec >"$RUN_DIR/pull.log" 2>&1` below to
+# capture the docker pull loop for post-mortem, but that also swallows
+# any fatal error from the user's point of view. Define an ERR handler
+# that writes diagnostics to fd 3 (the original stderr, captured just
+# before the exec) so a failure here is visible in the terminal and
+# points at the captured log. The function body is only evaluated when
+# the trap fires, so it's safe to define before `LOG_FILE` is set.
+on_err() {
+    local exit_code=$?
+    local line_no=${BASH_LINENO[0]}
+    echo "✗ $0: command failed (exit $exit_code) at line $line_no" >&3
+    echo "    last command: ${BASH_COMMAND}" >&3
+    if [[ -n "${LOG_FILE:-}" ]] && [[ -f "$LOG_FILE" ]]; then
+        echo "--- tail of $LOG_FILE ---" >&3
+        tail -n 30 "$LOG_FILE" >&3
+        echo "--- end tail ---" >&3
+    fi
+}
+
 # Source .env line-by-line, only exporting vars not already in the
 # environment. This lets cmdline overrides like
 # `SWEBENCH_SEED=2 SWEBENCH_N=100 ./run.sh` win over .env's defaults
@@ -86,9 +105,32 @@ sed 's/^/    - /' "$SAMPLE_FILE"
 
 # Pull + retag, skipping ones that are already in place. Tee all output
 # to runs/<run_id>/pull.log for post-mortem.
-exec >"$RUN_DIR/pull.log" 2>&1
+LOG_FILE="$RUN_DIR/pull.log"
+exec 3>&2  # preserve original stderr for the ERR trap
+exec >"$LOG_FILE" 2>&1
+trap 'on_err' ERR
+
 echo "→ pre-staging ${COUNT} image(s) from ${REMOTE_NAMESPACE} (${MODE_LABEL})"
 sed 's/^/    - /' "$SAMPLE_FILE"
+
+# Transient docker daemon / ghcr.io network blips on a single image are
+# the most likely cause of `set -e` tripping here, so retry a few times
+# with linear backoff before letting the ERR trap fire.
+pull_with_retry() {
+    local src=$1
+    local attempt=1
+    local max_attempts=${PULL_RETRY_ATTEMPTS:-3}
+    while (( attempt <= max_attempts )); do
+        if docker pull "$src"; then
+            return 0
+        fi
+        echo "  ⚠ pull attempt $attempt/$max_attempts failed for $src; retrying in $((attempt * 5))s"
+        sleep $((attempt * 5))
+        attempt=$((attempt + 1))
+    done
+    echo "  ✗ pull failed after $max_attempts attempts: $src"
+    return 1
+}
 
 while read -r id; do
     [[ -z "$id" ]] && continue
@@ -99,7 +141,7 @@ while read -r id; do
         echo "  ✓ $dst already present"
         continue
     fi
-    docker pull "$src"
+    pull_with_retry "$src"
     docker tag "$src" "$dst"
     echo "  ✓ $dst"
 done < "$SAMPLE_FILE"

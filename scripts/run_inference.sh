@@ -9,6 +9,23 @@ source .venv/bin/activate
 export PYTHONPATH="$(pwd)/config${PYTHONPATH:+:$PYTHONPATH}"
 export MSWEA_SILENT_STARTUP=1
 
+# This script does `exec >inference.log 2>&1` below to capture mini-extra
+# output, which also swallows any fatal error from the terminal. Define
+# an ERR handler that writes diagnostics to fd 3 (the original stderr,
+# captured just before the exec) so a failure here is visible and
+# points at the captured log.
+on_err() {
+    local exit_code=$?
+    local line_no=${BASH_LINENO[0]}
+    echo "✗ $0: command failed (exit $exit_code) at line $line_no" >&3
+    echo "    last command: ${BASH_COMMAND}" >&3
+    if [[ -n "${LOG_FILE:-}" ]] && [[ -f "$LOG_FILE" ]]; then
+        echo "--- tail of $LOG_FILE ---" >&3
+        tail -n 30 "$LOG_FILE" >&3
+        echo "--- end tail ---" >&3
+    fi
+}
+
 # Source .env line-by-line, only exporting vars not already in the
 # environment. Lets cmdline overrides win while still filling in
 # defaults for unset vars. LLM_MODEL is intentionally left for
@@ -64,7 +81,10 @@ echo "→ output          : $RUN_DIR"
 
 # mini-extra logs go to runs/<run_id>/inference.log so they survive the
 # inference exiting (mini-swe-agent only flushes its file handler at exit).
-exec >"$RUN_DIR/../inference.log" 2>&1
+LOG_FILE="$RUN_DIR/../inference.log"
+exec 3>&2  # preserve original stderr for the ERR trap
+exec >"$LOG_FILE" 2>&1
+trap 'on_err' ERR
 
 mini-extra swebench \
     -c swebench.yaml \
