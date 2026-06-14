@@ -1,7 +1,7 @@
 {
   "deepseek-v4-flash": {
-    "max_tokens": 131072,
-    "max_input_tokens": 131072,
+    "max_tokens": 250000,
+    "max_input_tokens": 250000,
     "input_cost_per_token": 0.0,
     "output_cost_per_token": 0.0,
     "litellm_provider": "openai",
