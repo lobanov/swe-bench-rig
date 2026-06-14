@@ -2,7 +2,7 @@
 """Export per-instance metrics from a run dir to CSV.
 
 Required columns:
-  instance_id, pass, inference_time_sec,
+  instance_id, pass, exit_status, inference_time_sec,
   llm_time_sec, llm_calls_count,
   llm_prompt_tokens_count, llm_cached_prompt_tokens_count,
   llm_completion_tokens_count
@@ -18,12 +18,26 @@ graded (e.g. an empty-patch instance that the harness skipped), we fall
 back to a best-effort: pass=False and inference/llm/token metrics come
 from the traj alone. --include-ungraded is the default; pass
 --graded-only to skip rows without an eval report.
+
+'exit_status' is the mini-swe-agent termination reason, read from
+traj.json["info"]["exit_status"]. Possible values (per
+minisweagent/exceptions.py and agents/default.py):
+  - ""            — empty (no traj / traj missing the field)
+  - "Submitted"   — agent finished via the submit command
+  - "LimitsExceeded" — step or cost limit hit
+  - "TimeExceeded"  — wall-clock time limit hit (subclass of LimitsExceeded)
+  - "FormatError"   — uncaught FormatError
+  - "RepeatedFormatError" — too many format errors in a row
+  - "UserInterruption"
+If the traj is missing the field, falls back to any
+inference/exit_statuses_*.yaml written by RunBatchProgressManager.
 """
 from __future__ import annotations
 
 import argparse
 import csv
 import json
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +63,30 @@ def find_eval_report(run_dir: Path, iid: str) -> Path | None:
         / "report.json"
     )
     return pattern if pattern.exists() else None
+
+
+def load_exit_status_yaml_map(inf_dir: Path) -> dict[str, str]:
+    """Build iid -> exit_status from the first inference/exit_statuses_*.yaml.
+
+    mini-swe-agent's RunBatchProgressManager writes one of these per run
+    with shape {instances_by_exit_status: {<status>: [<iid>, ...]}}. We
+    invert it for a per-instance lookup. Returns {} if no yaml is found
+    or it can't be parsed.
+    """
+    import yaml
+
+    yamls = sorted(inf_dir.glob("exit_statuses_*.yaml"))
+    if not yamls:
+        return {}
+    try:
+        data = yaml.safe_load(yamls[-1].read_text()) or {}
+    except Exception:
+        return {}
+    inv: dict[str, str] = {}
+    for status, iids in (data.get("instances_by_exit_status") or {}).items():
+        for iid in iids or []:
+            inv[iid] = status
+    return inv
 
 
 def summarize_traj(traj: dict) -> dict:
@@ -133,6 +171,7 @@ def main() -> int:
     fields = [
         "instance_id",
         "pass",
+        "exit_status",
         "inference_time_sec",
         "llm_time_sec",
         "llm_calls_count",
@@ -140,6 +179,10 @@ def main() -> int:
         "llm_cached_prompt_tokens_count",
         "llm_completion_tokens_count",
     ]
+
+    # Fallback lookup for exit_status in case a traj is missing the field
+    # (e.g. interrupted run, traj written by an older agent version).
+    yaml_status = load_exit_status_yaml_map(inf_dir)
 
     # Collect per-instance rows, ordered by instance_id for determinism.
     rows: list[dict] = []
@@ -162,10 +205,13 @@ def main() -> int:
             # but no gold grading happened.
             passed = False
 
+        status = safe_get(traj, "info", "exit_status", default="") or yaml_status.get(iid, "")
+
         m = summarize_traj(traj)
         rows.append({
             "instance_id": iid,
             "pass": passed,
+            "exit_status": status,
             **m,
         })
 
@@ -178,7 +224,16 @@ def main() -> int:
     # Also print a tiny summary to stdout.
     total = len(rows)
     n_pass = sum(1 for r in rows if r["pass"])
-    print(f"wrote {out_path}  rows={total}  pass={n_pass}  fail={total - n_pass}")
+    by_status: dict[str, int] = defaultdict(int)
+    for r in rows:
+        by_status[r["exit_status"] or "(empty)"] += 1
+    status_breakdown = ", ".join(
+        f"{s}={n}" for s, n in sorted(by_status.items(), key=lambda kv: (-kv[1], kv[0]))
+    )
+    print(
+        f"wrote {out_path}  rows={total}  pass={n_pass}  fail={total - n_pass}"
+        f"  by_status: {status_breakdown}"
+    )
     return 0
 
 
