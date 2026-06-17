@@ -57,9 +57,13 @@ See `PLAN.md` for the design and rationale.
 ## Quick start
 
 ```bash
-# 0. Prerequisites: uv, docker running, and a local LLM on http://10.77.0.2:1234/v1
-#    (LM Studio's default port; change LLM_BASE_URL in .env for vLLM/Ollama/...).
-#    The model must support tool/function calling (mini-swe-agent requires it).
+# 0. Prerequisites:
+#    - python
+#    - uv
+#    - docker running and accessible to the current user without sudo (add to docker group)
+#    - coreutils (for timeout, install with brew install coreutils on Mac)
+#    - a local LLM on http://10.77.0.2:1234/v1 (change LLM_BASE_URL in .env if different).
+#    Note that the model must support tool/function calling because mini-swe-agent requires it.
 
 # 1. (one time) create venv and install both upstream repos
 ./scripts/setup.sh
