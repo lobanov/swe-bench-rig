@@ -104,8 +104,12 @@ def compare_instance(iid: str, run_dirs: list[Path]) -> dict:
                                    if l.startswith("diff --git ") and len(l.split()) >= 3}),
         })
 
+    # identical_command_prefix = how many leading shell commands were identical across
+    # ALL runs. It is ALSO the 0-based index of the first command that differs, so 0 means
+    # the runs forked at the very first action. commands_identical is True only when the
+    # full command sequences matched end-to-end (no behavioural fork at all).
     prefix = common_prefix_len(cmd_seqs)
-    first_div = prefix if any(prefix < len(s) for s in cmd_seqs) else None
+    commands_identical = not any(prefix < len(s) for s in cmd_seqs)
     outcomes = {r["outcome"] for r in per_run}
     resolveds = {r["resolved"] for r in per_run}
     # pairwise patch identity / similarity (first vs each other)
@@ -115,8 +119,8 @@ def compare_instance(iid: str, run_dirs: list[Path]) -> dict:
         sim = round(min(difflib.SequenceMatcher(None, patches[0], p).ratio() for p in patches[1:]), 3)
 
     div_cmds = None
-    if first_div is not None:
-        div_cmds = [(s[first_div] if first_div < len(s) else "<ended>") for s in cmd_seqs]
+    if not commands_identical:
+        div_cmds = [(s[prefix] if prefix < len(s) else "<ended>") for s in cmd_seqs]
 
     return {
         "instance_id": iid,
@@ -124,7 +128,7 @@ def compare_instance(iid: str, run_dirs: list[Path]) -> dict:
         "runs": [r["run_id"] for r in per_run],
         "per_run": per_run,
         "identical_command_prefix": prefix,
-        "first_divergent_action": first_div,
+        "commands_identical": commands_identical,
         "first_divergent_commands": div_cmds,
         "outcome_diverges": len(outcomes) > 1 or len(resolveds) > 1,
         "outcomes": sorted(outcomes),
@@ -135,7 +139,7 @@ def compare_instance(iid: str, run_dirs: list[Path]) -> dict:
 
 def render_report(records: list[dict], run_names: list[str]) -> str:
     n = len(records)
-    fork0 = sum(1 for r in records if r["first_divergent_action"] == 0)
+    fork0 = sum(1 for r in records if r["identical_command_prefix"] == 0 and not r["commands_identical"])
     odiv = sum(1 for r in records if r["outcome_diverges"])
     pid = sum(1 for r in records if r["patch_identical"])
     L = [
@@ -145,13 +149,14 @@ def render_report(records: list[dict], run_names: list[str]) -> str:
         f"- Diverged at the very first action (#0): **{fork0}/{n}**",
         f"- Identical final patch across runs: **{pid}/{n}**",
         f"- **Outcome** diverged (resolved/empty/failed differs): **{odiv}/{n}**", "",
-        "| Instance | Runs | Identical cmd prefix | First fork | Outcomes | Patch identical | Patch sim |",
-        "|---|:--:|:--:|:--:|---|:--:|:--:|",
+        "| Instance | Runs | Shared cmd prefix (= fork @, 0-idx) | Outcomes | Patch identical | Patch sim |",
+        "|---|:--:|:--:|---|:--:|:--:|",
     ]
     for r in sorted(records, key=lambda x: (not x["outcome_diverges"], x["identical_command_prefix"])):
         L.append(
-            f"| `{r['instance_id']}` | {r['n_runs']} | {r['identical_command_prefix']} | "
-            f"{r['first_divergent_action']} | {' vs '.join(r['outcomes'])}"
+            f"| `{r['instance_id']}` | {r['n_runs']} | "
+            f"{r['identical_command_prefix']}{'' if not r['commands_identical'] else ' (no fork)'} | "
+            f"{' vs '.join(r['outcomes'])}"
             f"{' ⚠️' if r['outcome_diverges'] else ''} | {'yes' if r['patch_identical'] else 'no'} | "
             f"{r['patch_similarity'] if r['patch_similarity'] is not None else '—'} |"
         )
@@ -161,11 +166,13 @@ def render_report(records: list[dict], run_names: list[str]) -> str:
         for pr in r["per_run"]:
             L.append(f"- **{pr['run_id']}**: outcome=`{pr['outcome']}` resolved={pr['resolved']} "
                      f"actions={pr['n_actions']} patch_len={pr['patch_len']} files={pr['patch_files']}")
-        if r["first_divergent_action"] is not None:
-            L.append(f"- forks at action #{r['first_divergent_action']} "
-                     f"(identical first {r['identical_command_prefix']} commands), then:")
+        if not r["commands_identical"]:
+            L.append(f"- forked at action #{r['identical_command_prefix']} "
+                     f"(0-indexed; shared the first {r['identical_command_prefix']} command(s)), then:")
             for run_id, cmd in zip(r["runs"], r["first_divergent_commands"] or []):
                 L.append(f"    - `{run_id}`: `{cmd[:160]}`")
+        else:
+            L.append("- command sequences were byte-identical across runs (no behavioural fork)")
         L.append("")
     return "\n".join(L)
 
@@ -195,13 +202,14 @@ def main() -> int:
         for r in records:
             f.write(json.dumps(r) + "\n")
 
-    fork0 = sum(1 for r in records if r["first_divergent_action"] == 0)
+    fork0 = sum(1 for r in records if r["identical_command_prefix"] == 0 and not r["commands_identical"])
     odiv = sum(1 for r in records if r["outcome_diverges"])
     print(f"repeated instances: {len(records)}  fork@0: {fork0}  outcome-diverged: {odiv}")
     print(f"wrote {out} and {jsonl}")
     for r in records:
-        print(f"  {r['instance_id']}: prefix={r['identical_command_prefix']} "
-              f"fork={r['first_divergent_action']} outcomes={'/'.join(r['outcomes'])}"
+        fork = "no-fork" if r["commands_identical"] else f"@{r['identical_command_prefix']}"
+        print(f"  {r['instance_id']}: shared_prefix={r['identical_command_prefix']} "
+              f"fork={fork} outcomes={'/'.join(r['outcomes'])}"
               f"{'  <-- OUTCOME DIVERGES' if r['outcome_diverges'] else ''}")
     return 0
 

@@ -166,10 +166,12 @@ from server nondeterminism.
     --out REPEATS_REPORT.md
 ```
 
-It finds instances completed in >1 run and reports, per instance: the
-`identical_command_prefix` (leading actions whose shell command matches across runs),
-`first_divergent_action`, whether the **outcome** diverged (resolved / empty / failed),
-`patch_identical`, and patch similarity (difflib ratio). Writes `REPEATS_REPORT.md` +
+It finds instances completed in >1 run and reports, per instance: `identical_command_prefix`
+(how many leading shell commands matched across runs — **this is also the 0-based index of the
+first command that differs**, so `0` means the runs forked at the very first action),
+`commands_identical` (true only when the full command sequences matched, i.e. no behavioural fork),
+whether the **outcome** diverged (resolved / empty / failed), `patch_identical`, and patch
+similarity (difflib ratio). Writes `REPEATS_REPORT.md` +
 `.jsonl`. Observed on this rig: runs typically **fork at action #0** (immediate
 divergence), yet sometimes reconverge to a near-identical patch and sometimes don't —
 so report both behavioural fork point *and* outcome/patch convergence, they tell
