@@ -134,7 +134,8 @@ pull_with_retry() {
 
 while read -r id; do
     [[ -z "$id" ]] && continue
-    src="${REMOTE_NAMESPACE}/swe-bench.eval.${ARCH}.${id,,}:latest"
+    id_lc="$(printf '%s' "$id" | tr '[:upper:]' '[:lower:]')"
+    src="${REMOTE_NAMESPACE}/swe-bench.eval.${ARCH}.${id_lc}:latest"
     compat_id="${id//__/_1776_}"
     dst="${LOCAL_NAMESPACE}/sweb.eval.${ARCH}.${compat_id}:latest"
     if docker image inspect "$dst" >/dev/null 2>&1; then

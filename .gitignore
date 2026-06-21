@@ -14,3 +14,21 @@ runs/
 .DS_Store
 
 vendor/
+
+# Local Claude settings (the skills/ dir is tracked)
+.claude/settings.local.json
+
+# Published failure-analysis dataset — lives on Hugging Face, pulled via `hf download`
+hf-dataset/
+
+# Locally-generated, regenerable analysis artifacts (duplicate the dataset)
+/RESULTS_TABLE.md
+/REPEATS_REPORT.md
+/REPEATS_REPORT.jsonl
+
+# Experiment-specific instance-id lists (referenced via SWEBENCH_INPUT_FILE)
+/inputs/*
+!/inputs/README.md
+
+# Accidental nested clone
+/swe-bench-rig/
