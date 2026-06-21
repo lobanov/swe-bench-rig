@@ -35,11 +35,15 @@ See `PLAN.md` for the design and rationale.
 │   ├── run_inference.sh                 # run mini-swe-agent batch on the sample
 │   ├── run_evaluation.sh                # run SWE-bench harness local grading
 │   ├── run_to_csv.py                    # export per-instance metrics to results.csv
-│   └── report.py                        # summarise results with Wilson 95% CI
+│   ├── report.py                        # summarise results with Wilson 95% CI
+│   ├── make_failure_dataset.py          # build the appendable failure-analysis HF dataset
+│   ├── render_transcript.py             # compact human-readable transcript from a .traj.json
+│   └── compare_repeats.py               # temperature-0 divergence across repeated instances
 ├── config/
 │   ├── mini-swe-agent.local.yaml        # mini-swe-agent config wired to local LLM
 │   ├── litellm-registry.json            # cost-tracking stub, rewritten by check_server.py
 │   └── sitecustomize.py                 # auto-loaded image-resolver patch + litellm silence
+├── inputs/                              # instance-id lists for SWEBENCH_INPUT_FILE (lists gitignored)
 ├── vendor/swebench/                     # swebench editable install (one-time clone)
 ├── runs/                                # all run artifacts (gitignored)
 │   └── <run_id>/
@@ -97,9 +101,9 @@ SWEBENCH_SLICE=0:500 SWEBENCH_RUN_ID=full-$(date +%s) ./run.sh
 # Custom slice (e.g. instances 50..150)
 SWEBENCH_SLICE=50:150 SWEBENCH_RUN_ID=slice-50-150-$(date +%s) ./run.sh
 
-# Hand-picked list
-echo -e "django__django-11999\nastropy__astropy-13033" > /tmp/my_ids.txt
-SWEBENCH_INPUT_FILE=/tmp/my_ids.txt SWEBENCH_RUN_ID=custom-$(date +%s) ./run.sh
+# Hand-picked list (drop lists in inputs/ — gitignored; see inputs/README.md)
+echo -e "django__django-11999\nastropy__astropy-13033" > inputs/my_ids.txt
+SWEBENCH_INPUT_FILE=inputs/my_ids.txt SWEBENCH_RUN_ID=custom-$(date +%s) ./run.sh
 
 # Random sample (the original behavior)
 SWEBENCH_N=100 SWEBENCH_SEED=1 SWEBENCH_RUN_ID=random-100-$(date +%s) ./run.sh
@@ -282,3 +286,26 @@ The rig clones `SWE-bench` to `vendor/swebench/` and installs it
 editable, which makes the fixtures accessible at runtime via
 `resources.files(swebench.resources).joinpath(...)`. Re-running
 `./scripts/setup.sh` is idempotent; the clone only happens once.
+
+## Failure analysis & dataset
+
+Beyond `results.csv`, the rig can turn completed runs into a per-instance **failure-analysis
+dataset** (published to Hugging Face) — metrics + a deterministic failure taxonomy + a
+hand-verified qualitative root-cause per instance, plus a temperature-0 reproducibility check.
+
+```bash
+# 1. stage artifacts + build the table for one or more graded runs
+.venv/bin/python scripts/make_failure_dataset.py --out hf-dataset \
+    --population <sample|prior-failures> --arch <arch> \
+    --server-commit <sha> --server-url <url> runs/<run_id> [runs/<run_id> ...]
+#    -> prints NEED DIAGNOSIS for instances missing a root-cause diagnosis
+
+# 2. compare instances run more than once (temperature-0 divergence)
+.venv/bin/python scripts/compare_repeats.py runs/<a> runs/<b> --out REPEATS_REPORT.md
+```
+
+`make_failure_dataset.py` is idempotent and **appendable** (run-scoped paths, merge-preserve), and
+also emits a GitHub-pasteable `RESULTS_TABLE.md` at the repo root (local convenience; gitignored).
+The qualitative diagnosis step and the full publish/append workflow are driven by the
+`swebench-failure-analysis` skill in `.claude/skills/`. The built dataset (`hf-dataset/`) is
+gitignored — it lives on Hugging Face and is pulled with `hf download` when appending.
